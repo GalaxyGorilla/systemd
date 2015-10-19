@@ -42,6 +42,36 @@
 
 #define JSON_THRESHOLD 4096
 
+typedef int (*OutputFunc)(OutputFormatter *formatter,
+                          FILE *f,
+                          sd_journal*j,
+                          unsigned n_columns,
+                          OutputFlags flags);
+
+typedef enum {
+        OUTPUT_FIELD_LITERAL,      /* data is a literal string to print */
+        OUTPUT_FIELD_DATE,         /* data is a variable to show as a simple date */
+        OUTPUT_FIELD_DATE_PRECISE, /* data is a variable to show as a precise date */
+        OUTPUT_FIELD_DATE_ISO,     /* data is a variable to show as a ISO date */
+        OUTPUT_FIELD_DATE_RAW,     /* data is a variable to show as a RAW timestamp */
+        OUTPUT_FIELD_STRING,       /* data is a variable to show as a printable string */
+        OUTPUT_FIELD_STRING_RAW,   /* data is a variable to show as a raw string */
+} OutputFieldType;
+
+typedef struct _OutputField {
+        OutputFieldType type;
+        size_t vallen; /* Truncate value to this length when printing */
+        const char *data;
+        size_t datalen;
+} OutputField;
+
+struct _OutputFormatter {
+        OutputFunc handler;
+        OutputMode mode;
+        size_t nfields;
+        OutputField *fields;
+};
+
 static int print_catalog(FILE *f, sd_journal *j) {
         int r;
         _cleanup_free_ char *t = NULL, *z = NULL;
@@ -189,10 +219,57 @@ static bool print_multiline(FILE *f, unsigned prefix, unsigned n_columns, Output
         return ellipsized;
 }
 
+static int print_time(uint64_t ts, OutputFieldType type, FILE *f) {
+        int n, r;
+        char buf[64];
+        time_t t;
+        struct tm tm;
+
+        assert(f);
+
+        t = (time_t)(ts / USEC_PER_SEC);
+
+        switch (type) {
+        case OUTPUT_FIELD_DATE:
+                r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", localtime_r(&t, &tm));
+                break;
+
+        case OUTPUT_FIELD_DATE_PRECISE:
+                r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", localtime_r(&t, &tm));
+                if (r > 0) {
+                        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
+                                 ".%06llu", (unsigned long long) (ts % USEC_PER_SEC));
+                }
+                break;
+
+        case OUTPUT_FIELD_DATE_ISO:
+                r = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", localtime_r(&t, &tm));
+                break;
+
+        case OUTPUT_FIELD_DATE_RAW:
+                r = snprintf(buf, sizeof(buf), "[%5llu.%06llu]",
+                             (unsigned long long) (ts / USEC_PER_SEC),
+                             (unsigned long long) (ts % USEC_PER_SEC));
+                break;
+
+        default:
+                return -EINVAL;
+        }
+
+        if (r <= 0) {
+                log_error("Failed to format time.");
+                return -EINVAL;
+        }
+        fputs(buf, f);
+        n = strlen(buf);
+
+        return n;
+}
+
 static int output_short(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -205,6 +282,7 @@ static int output_short(
         int p = LOG_INFO;
         bool ellipsized = false;
 
+        assert(formatter);
         assert(f);
         assert(j);
 
@@ -283,7 +361,7 @@ static int output_short(
         if (priority_len == 1 && *priority >= '0' && *priority <= '7')
                 p = *priority - '0';
 
-        if (mode == OUTPUT_SHORT_MONOTONIC) {
+        if (formatter->mode == OUTPUT_SHORT_MONOTONIC) {
                 uint64_t t;
                 sd_id128_t boot_id;
 
@@ -298,18 +376,13 @@ static int output_short(
                 if (r < 0)
                         return log_error_errno(r, "Failed to get monotonic timestamp: %m");
 
-                fprintf(f, "[%5llu.%06llu]",
-                        (unsigned long long) (t / USEC_PER_SEC),
-                        (unsigned long long) (t % USEC_PER_SEC));
+                if ((r = print_time(t, OUTPUT_FIELD_DATE_RAW, f)) < 0)
+                        return log_error_errno(r, "Failed to format monotonic timestamp: %m");
 
-                n += 1 + 5 + 1 + 6 + 1;
+                n += r;
 
         } else {
-                char buf[64];
                 uint64_t x;
-                time_t t;
-                struct tm tm;
-                struct tm *(*gettime_r)(const time_t *, struct tm *);
 
                 r = -ENOENT;
                 gettime_r = (flags & OUTPUT_UTC) ? gmtime_r : localtime_r;
@@ -323,30 +396,21 @@ static int output_short(
                 if (r < 0)
                         return log_error_errno(r, "Failed to get realtime timestamp: %m");
 
-                t = (time_t) (x / USEC_PER_SEC);
-
-                switch(mode) {
+                switch (formatter->mode) {
                 case OUTPUT_SHORT_ISO:
-                        r = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", gettime_r(&t, &tm));
+                        if ((r = print_time(x, OUTPUT_FIELD_DATE_ISO, f)) < 0)
+                                return log_error_errno(r, "Failed to format time as iso timestamp: %m");
                         break;
                 case OUTPUT_SHORT_PRECISE:
-                        r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm));
-                        if (r > 0) {
-                                snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
-                                         ".%06llu", (unsigned long long) (x % USEC_PER_SEC));
-                        }
+                        if ((r = print_time(x, OUTPUT_FIELD_DATE_PRECISE, f)) < 0)
+                                return log_error_errno(r, "Failed to format time as precise timestamp: %m");
                         break;
                 default:
-                        r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm));
+                        if ((r = print_time(x, OUTPUT_FIELD_DATE, f)) < 0)
+                                return log_error_errno(r, "Failed to format time as default timestamp: %m");
+                        break;
                 }
-
-                if (r <= 0) {
-                        log_error("Failed to format time.");
-                        return -EINVAL;
-                }
-
-                fputs(buf, f);
-                n += strlen(buf);
+                n += r;
         }
 
         if (hostname && shall_print(hostname, hostname_len, flags)) {
@@ -389,7 +453,7 @@ static int output_short(
 static int output_verbose(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -400,6 +464,7 @@ static int output_verbose(
         char ts[FORMAT_TIMESTAMP_MAX + 7];
         int r;
 
+        assert(formatter);
         assert(f);
         assert(j);
 
@@ -492,7 +557,7 @@ static int output_verbose(
 static int output_export(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -504,6 +569,7 @@ static int output_export(
         const void *data;
         size_t length;
 
+        assert(formatter);
         assert(j);
 
         sd_journal_set_data_threshold(j, 0);
@@ -624,7 +690,7 @@ void json_escape(
 static int output_json(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -638,6 +704,7 @@ static int output_json(
         Hashmap *h = NULL;
         bool done, separator;
 
+        assert(formatter);
         assert(j);
 
         sd_journal_set_data_threshold(j, flags & OUTPUT_SHOW_ALL ? 0 : JSON_THRESHOLD);
@@ -654,7 +721,7 @@ static int output_json(
         if (r < 0)
                 return log_error_errno(r, "Failed to get cursor: %m");
 
-        if (mode == OUTPUT_JSON_PRETTY)
+        if (formatter->mode == OUTPUT_JSON_PRETTY)
                 fprintf(f,
                         "{\n"
                         "\t\"__CURSOR\" : \"%s\",\n"
@@ -666,7 +733,7 @@ static int output_json(
                         monotonic,
                         sd_id128_to_string(boot_id, sid));
         else {
-                if (mode == OUTPUT_JSON_SSE)
+                if (formatter->mode == OUTPUT_JSON_SSE)
                         fputs("data: ", f);
 
                 fprintf(f,
@@ -743,7 +810,7 @@ static int output_json(
                                 continue;
 
                         if (separator) {
-                                if (mode == OUTPUT_JSON_PRETTY)
+                                if (formatter->mode == OUTPUT_JSON_PRETTY)
                                         fputs(",\n\t", f);
                                 else
                                         fputs(", ", f);
@@ -818,9 +885,9 @@ static int output_json(
 
         } while (!done);
 
-        if (mode == OUTPUT_JSON_PRETTY)
+        if (formatter->mode == OUTPUT_JSON_PRETTY)
                 fputs("\n}\n", f);
-        else if (mode == OUTPUT_JSON_SSE)
+        else if (formatter->mode == OUTPUT_JSON_SSE)
                 fputs("}\n\n", f);
         else
                 fputs(" }\n", f);
@@ -839,7 +906,7 @@ finish:
 static int output_cat(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -847,6 +914,7 @@ static int output_cat(
         size_t l;
         int r;
 
+        assert(formatter);
         assert(j);
         assert(f);
 
@@ -869,13 +937,111 @@ static int output_cat(
         return 0;
 }
 
-static int (*output_funcs[_OUTPUT_MODE_MAX])(
+static int output_format(
+                OutputFormatter *formatter,
                 FILE *f,
-                sd_journal*j,
-                OutputMode mode,
+                sd_journal *j,
                 unsigned n_columns,
-                OutputFlags flags) = {
+                OutputFlags flags) {
 
+        size_t i;
+        const void *data;
+        size_t l;
+        int r;
+        uint64_t t;
+        bool truncated;
+
+        assert(formatter);
+        assert(j);
+        assert(f);
+
+        sd_journal_set_data_threshold(j, 0);
+
+        for (i = 0 ; i < formatter->nfields ; i++) {
+                switch (formatter->fields[i].type) {
+                case OUTPUT_FIELD_LITERAL:
+                        fputs(formatter->fields[i].data, f);
+                        break;
+
+                case OUTPUT_FIELD_DATE:
+                case OUTPUT_FIELD_DATE_PRECISE:
+                case OUTPUT_FIELD_DATE_ISO:
+                case OUTPUT_FIELD_DATE_RAW:
+                        if (streq(formatter->fields[i].data, "__MONOTONIC_TIMESTAMP")) {
+                                sd_id128_t boot_id;
+                                r = sd_journal_get_monotonic_usec(j, &t, &boot_id);
+                        } else if (streq(formatter->fields[i].data, "__REALTIME_TIMESTAMP")) {
+                                r = sd_journal_get_realtime_usec(j, &t);
+                        } else {
+                                r = sd_journal_get_data(j, formatter->fields[i].data, &data, &l);
+
+                                if (r > 0) {
+                                        assert(l >= formatter->fields[i].datalen);
+                                        r = safe_atou64((const char *)data + formatter->fields[i].datalen + 1, &t);
+                                }
+                        }
+
+                        if (r < 0) {
+                                if (r == -ENOENT)
+                                        continue;
+
+                                log_error("Failed to get %s: %s", formatter->fields[i].data, strerror(-r));
+                                return r;
+                        }
+
+                        r = print_time(t, formatter->fields[i].type, f);
+                        if (r < 0)
+                                return r;
+                        break;
+
+                        case OUTPUT_FIELD_STRING:
+                        case OUTPUT_FIELD_STRING_RAW:
+                                sd_journal_set_data_threshold(j, 0);
+
+                                r = sd_journal_get_data(j, formatter->fields[i].data, &data, &l);
+                                if (r < 0) {
+                                        if (r == -ENOENT)
+                                                continue;
+
+                                        log_error("Failed to get data: %s", strerror(-r));
+                                        return r;
+                                }
+
+                                assert(l >= formatter->fields[i].datalen);
+
+                                data = ((const char *)data) + formatter->fields[i].datalen + 1;
+                                l -= formatter->fields[i].datalen + 1;
+
+                                if (formatter->fields[i].vallen != 0 && l > formatter->fields[i].vallen) {
+                                        l = formatter->fields[i].vallen;
+                                        truncated = true;
+                                } else {
+                                        truncated = false;
+                                }
+
+                                if (formatter->fields[i].type == OUTPUT_FIELD_STRING_RAW) {
+                                        fwrite((const char*) data, 1, l, f);
+                                } else {
+                                        if (((const char *)data)[l - 1] == '\n')
+                                                l--;
+
+                                        if (!utf8_is_printable(data, l)) {
+                                                char bytes[FORMAT_BYTES_MAX];
+                                                fprintf(f, "[%s blob data]", format_bytes(bytes, sizeof(bytes), l));
+                                        } else {
+                                                fwrite((const char*) data, 1, l, f);
+                                        }
+                                        if (truncated)
+                                                fputs("...", f);
+                                }
+                                break;
+                    }
+        }
+
+        return 0;
+}
+
+static OutputFunc output_funcs[_OUTPUT_MODE_MAX] = {
         [OUTPUT_SHORT] = output_short,
         [OUTPUT_SHORT_ISO] = output_short,
         [OUTPUT_SHORT_PRECISE] = output_short,
@@ -885,25 +1051,25 @@ static int (*output_funcs[_OUTPUT_MODE_MAX])(
         [OUTPUT_JSON] = output_json,
         [OUTPUT_JSON_PRETTY] = output_json,
         [OUTPUT_JSON_SSE] = output_json,
-        [OUTPUT_CAT] = output_cat
+        [OUTPUT_CAT] = output_cat,
+        [OUTPUT_FORMAT] = output_format,
 };
 
 int output_journal(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags,
                 bool *ellipsized) {
 
         int ret;
-        assert(mode >= 0);
-        assert(mode < _OUTPUT_MODE_MAX);
+        assert(formatter);
 
         if (n_columns <= 0)
                 n_columns = columns();
 
-        ret = output_funcs[mode](f, j, mode, n_columns, flags);
+        ret = formatter->handler(formatter, f, j, n_columns, flags);
         fflush(stdout);
 
         if (ellipsized && ret > 0)
@@ -929,7 +1095,7 @@ static int maybe_print_begin_newline(FILE *f, OutputFlags *flags) {
 
 static int show_journal(FILE *f,
                         sd_journal *j,
-                        OutputMode mode,
+                        OutputFormatter *formatter,
                         unsigned n_columns,
                         usec_t not_before,
                         unsigned how_many,
@@ -942,8 +1108,7 @@ static int show_journal(FILE *f,
         int warn_cutoff = flags & OUTPUT_WARN_CUTOFF;
 
         assert(j);
-        assert(mode >= 0);
-        assert(mode < _OUTPUT_MODE_MAX);
+        assert(formatter);
 
         /* Seek to end */
         r = sd_journal_seek_tail(j);
@@ -986,7 +1151,7 @@ static int show_journal(FILE *f,
                         line ++;
                         maybe_print_begin_newline(f, &flags);
 
-                        r = output_journal(f, j, mode, n_columns, flags, ellipsized);
+                        r = output_journal(f, j, formatter, n_columns, flags, ellipsized);
                         if (r < 0)
                                 goto finish;
                 }
@@ -1228,7 +1393,7 @@ int add_match_this_boot(sd_journal *j, const char *machine) {
 int show_journal_by_unit(
                 FILE *f,
                 const char *unit,
-                OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 usec_t not_before,
                 unsigned how_many,
@@ -1241,8 +1406,7 @@ int show_journal_by_unit(
         _cleanup_journal_close_ sd_journal*j = NULL;
         int r;
 
-        assert(mode >= 0);
-        assert(mode < _OUTPUT_MODE_MAX);
+        assert(formatter);
         assert(unit);
 
         if (how_many <= 0)
@@ -1270,7 +1434,7 @@ int show_journal_by_unit(
                 log_debug("Journal filter: %s", filter);
         }
 
-        return show_journal(f, j, mode, n_columns, not_before, how_many, flags, ellipsized);
+        return show_journal(f, j, formatter, n_columns, not_before, how_many, flags, ellipsized);
 }
 
 static const char *const output_mode_table[_OUTPUT_MODE_MAX] = {
@@ -1283,7 +1447,245 @@ static const char *const output_mode_table[_OUTPUT_MODE_MAX] = {
         [OUTPUT_JSON] = "json",
         [OUTPUT_JSON_PRETTY] = "json-pretty",
         [OUTPUT_JSON_SSE] = "json-sse",
-        [OUTPUT_CAT] = "cat"
+        [OUTPUT_CAT] = "cat",
+        [OUTPUT_FORMAT] = "format",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(output_mode, OutputMode);
+
+void output_formatter_free(OutputFormatter **formatter) {
+        if (!*formatter)
+                return;
+
+        free(*formatter);
+        *formatter = NULL;
+}
+
+static int output_formatter_add_field(OutputFormatter *formatter,
+        OutputFieldType type,
+        size_t vallen,
+        char *data,
+        size_t datalen)
+{
+        OutputField *fields;
+
+        fields = realloc_multiply(formatter->fields,
+        sizeof(OutputField),
+        formatter->nfields + 1);
+        if (!fields)
+                return -ENOMEM;
+
+        fields[formatter->nfields].type = type;
+        fields[formatter->nfields].vallen = vallen;
+        fields[formatter->nfields].data = data;
+        fields[formatter->nfields].datalen = datalen;
+        formatter->fields = fields;
+        formatter->nfields++;
+
+        return 0;
+}
+
+static int output_formatter_expand_escapes(char *data)
+{
+        size_t i, j;
+
+        for (i = 0, j = 0; data[i] != '\0'; i++) {
+                if (data[i] == '\\') {
+                        i++;
+                        switch (data[i]) {
+                        case '\'':
+                                data[j++] = '\'';
+                                break;
+                        case '"':
+                                data[j++] = '"';
+                                break;
+                        case '?':
+                                data[j++] = '?';
+                                break;
+                        case '\\':
+                                data[j++] = '\\';
+                                break;
+                        case 'a':
+                                data[j++] = '\a';
+                                break;
+                        case 'b':
+                                data[j++] = '\b';
+                                break;
+                        case 'f':
+                                data[j++] = '\f';
+                                break;
+                        case 'n':
+                                data[j++] = '\n';
+                                break;
+                        case 'r':
+                                data[j++] = '\r';
+                                break;
+                        case 't':
+                                data[j++] = '\t';
+                                break;
+                        case 'v':
+                                data[j++] = '\v';
+                                break;
+                        default:
+                                return -EINVAL;
+                        }
+                } else {
+                        data[j++] = data[i];
+                }
+        }
+        data[j] = '\0';
+
+        return 0;
+}
+
+static int output_formatter_parse_format(OutputFormatter *formatter,
+        const char *format) {
+        const char *prev = format;
+        int r;
+
+        do {
+                const char *next;
+                char *data;
+                size_t datalen;
+
+                next = strstr(format, "%(");
+
+                if (!next || next != prev) {
+                        datalen = next ? (size_t)(next - prev) : strlen(prev);
+                        data = strndup(prev, datalen);
+
+                        if ((r = output_formatter_expand_escapes(data)) < 0)
+                                return r;
+
+                        if ((r = output_formatter_add_field(formatter, OUTPUT_FIELD_LITERAL, 0, data, datalen)) < 0) {
+                                free(data);
+                                return r;
+                        }
+                }
+
+                if (next) {
+                        const char *end;
+                        OutputFieldType type;
+                        char *typestr;
+                        char *lenstr;
+                        uint64_t vallen;
+
+                        end = strchr(next, ')');
+                        if (!end)
+                                return -EINVAL;
+
+                        datalen = (end - (next + 2));
+                        data = strndup(next + 2, datalen);
+
+                        if ((typestr = strchr(data, ':')) != NULL) {
+                                datalen = typestr - data;
+                                *typestr = '\0';
+                                typestr++;
+                                lenstr = strchr(typestr, ':');
+                                if (lenstr) {
+                                        *lenstr = '\0';
+                                        lenstr++;
+                                        if ((r = safe_atou64(lenstr, &vallen)) < 0) {
+                                                free(data);
+                                                return r;
+                                        }
+                                }
+
+                                if (streq(typestr, "string"))
+                                        type = OUTPUT_FIELD_STRING;
+                                else if (streq(typestr, "date"))
+                                        type = OUTPUT_FIELD_DATE;
+                                else if (streq(typestr, "date-precise"))
+                                        type = OUTPUT_FIELD_DATE_PRECISE;
+                                else if (streq(typestr, "date-iso"))
+                                        type = OUTPUT_FIELD_DATE_ISO;
+                                else if (streq(typestr, "date-raw"))
+                                        type = OUTPUT_FIELD_DATE_RAW;
+                                else if (streq(typestr, "string-raw"))
+                                        type = OUTPUT_FIELD_STRING_RAW;
+                                else {
+                                        free(data);
+                                        return -EINVAL;
+                                }
+                        } else {
+                                if (streq(data, "__MONOTONIC_TIMESTAMP"))
+                                        type = OUTPUT_FIELD_DATE_RAW;
+                                else if (streq(data, "__REALTIME_TIMESTAMP"))
+                                        type = OUTPUT_FIELD_DATE;
+                                else
+                                        type = OUTPUT_FIELD_STRING;
+                        }
+
+                        if ((r = output_formatter_add_field(formatter, type, vallen, data, datalen)) < 0) {
+                                free(data);
+                                return r;
+                        }
+                        format = end + 1;
+                        prev = end + 1;
+                } else {
+                        format = NULL;
+                }
+        } while (format && *format);
+
+        return 0;
+}
+
+#define DEFAULT_FORMAT "%(__REALTIME_TIMESTAMP) %(_HOSTNAME) %(SYSLOG_IDENTIFIER)[%(_PID)]: %(MESSAGE)\\n"
+
+int output_formatter_from_mode(OutputMode mode, OutputFormatter **formatter)
+{
+        int r;
+        _cleanup_output_formatter_ OutputFormatter *ret = NULL;
+
+        assert(mode >= 0);
+        assert(mode < _OUTPUT_MODE_MAX);
+        assert(formatter);
+        assert(!*formatter);
+
+        if (!(ret = new(OutputFormatter, 1)))
+                return -ENOMEM;
+
+        ret->mode = mode;
+        if (ret->mode == OUTPUT_FORMAT &&  ((r = output_formatter_parse_format(ret, DEFAULT_FORMAT)) < 0))
+                return r;
+        ret->handler = output_funcs[ret->mode];
+
+        *formatter = ret;
+        ret = NULL;
+        return 0;
+}
+
+int output_formatter_from_string(const char *arg, OutputFormatter **formatter) {
+        int r;
+        _cleanup_output_formatter_ OutputFormatter *ret = NULL;
+
+        assert(arg);
+        assert(formatter);
+        assert(!*formatter);
+
+        if (!(ret = new(OutputFormatter, 1)))
+                return -ENOMEM;
+
+        if (strneq(arg, "format:", 7)) {
+                ret->mode = OUTPUT_FORMAT;
+                if ((r = output_formatter_parse_format(ret, arg + 7)) < 0)
+                        return r;
+        } else {
+                if ((ret->mode = output_mode_from_string(arg)) < 0)
+                        return -EINVAL;
+
+                if (ret->mode == OUTPUT_FORMAT && ((r = output_formatter_parse_format(ret, DEFAULT_FORMAT)) < 0))
+                        return r;
+        }
+        ret->handler = output_funcs[ret->mode];
+
+        *formatter = ret;
+        ret = NULL;
+        return 0;
+}
+
+OutputMode output_formatter_get_mode(OutputFormatter *formatter) {
+        assert(formatter);
+
+        return formatter->mode;
+}
