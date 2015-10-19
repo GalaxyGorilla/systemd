@@ -74,7 +74,8 @@ static bool arg_mkdir = false;
 static bool arg_quiet = false;
 static bool arg_ask_password = true;
 static unsigned arg_lines = 10;
-static OutputMode arg_output = OUTPUT_SHORT;
+static const char *arg_output = "short";
+static OutputFormatter *arg_formatter = NULL;
 static bool arg_force = false;
 static ImportVerify arg_verify = IMPORT_VERIFY_SIGNATURE;
 static const char* arg_dkr_index_url = NULL;
@@ -589,7 +590,7 @@ static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
                         show_journal_by_unit(
                                         stdout,
                                         i->unit,
-                                        arg_output,
+                                        arg_formatter,
                                         0,
                                         i->timestamp.monotonic,
                                         arg_lines,
@@ -2233,7 +2234,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "  -n --lines=INTEGER          Number of journal entries to show\n"
                "  -o --output=STRING          Change journal output mode (short,\n"
                "                              short-monotonic, verbose, export, json,\n"
-               "                              json-pretty, json-sse, cat)\n"
+               "                              json-pretty, json-sse, cat, format:FORMAT-STRING)\n"
                "      --verify=MODE           Verification mode for downloaded images (no,\n"
                "                              checksum, signature)\n"
                "      --force                 Download image even if already exists\n"
@@ -2313,6 +2314,7 @@ static int parse_argv(int argc, char *argv[]) {
         };
 
         int c, r;
+        int err;
 
         assert(argc >= 0);
         assert(argv);
@@ -2356,11 +2358,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'o':
-                        arg_output = output_mode_from_string(optarg);
-                        if (arg_output < 0) {
-                                log_error("Unknown output '%s'.", optarg);
-                                return -EINVAL;
-                        }
+                        arg_output = optarg;
                         break;
 
                 case ARG_NO_PAGER:
@@ -2436,6 +2434,11 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
+
+        if ((err = output_formatter_from_string(arg_output, &arg_formatter)) < 0) {
+                log_error("Unknown / malformed output format '%s'.", arg_output);
+                return err;
+        }
 
         return 1;
 }

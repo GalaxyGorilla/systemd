@@ -130,6 +130,7 @@ static ssize_t request_reader_entries(
         RequestMeta *m = cls;
         int r;
         size_t n, k;
+        _cleanup_output_formatter_ OutputFormatter *output_formatter = NULL;
 
         assert(m);
         assert(buf);
@@ -137,6 +138,11 @@ static ssize_t request_reader_entries(
         assert(pos >= m->delta);
 
         pos -= m->delta;
+
+        if ((r = output_formatter_from_mode(m->mode, &output_formatter)) < 0) {
+                log_error("Failed to parse mode: %s", strerror(-r));
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        }
 
         while (pos >= m->size) {
                 off_t sz;
@@ -204,7 +210,7 @@ static ssize_t request_reader_entries(
                         }
                 }
 
-                r = output_journal(m->tmp, m->journal, m->mode, 0, OUTPUT_FULL_WIDTH, NULL);
+                r = output_journal(m->tmp, m->journal, output_formatter, 0, OUTPUT_FULL_WIDTH, NULL);
                 if (r < 0) {
                         log_error_errno(r, "Failed to serialize item: %m");
                         return MHD_CONTENT_READER_END_WITH_ERROR;
