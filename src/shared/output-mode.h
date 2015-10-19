@@ -32,6 +32,7 @@ typedef enum OutputMode {
         OUTPUT_JSON_PRETTY,
         OUTPUT_JSON_SSE,
         OUTPUT_CAT,
+        OUTPUT_FORMAT,
         _OUTPUT_MODE_MAX,
         _OUTPUT_MODE_INVALID = -1
 } OutputMode;

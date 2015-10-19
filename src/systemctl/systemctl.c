@@ -136,7 +136,9 @@ static enum action {
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
 static char *arg_host = NULL;
 static unsigned arg_lines = 10;
-static OutputMode arg_output = OUTPUT_SHORT;
+//static OutputMode arg_output = OUTPUT_SHORT;
+static const char *arg_output = "short";
+static OutputFormatter *arg_formatter = NULL;
 static bool arg_plain = false;
 
 static bool original_stdout_is_tty;
@@ -3535,7 +3537,8 @@ static void print_status_info(
                 show_journal_by_unit(
                                 stdout,
                                 i->id,
-                                arg_output,
+                                //arg_output,
+                                arg_formatter,
                                 0,
                                 i->inactive_exit_timestamp_monotonic,
                                 arg_lines,
@@ -6066,7 +6069,8 @@ static void systemctl_help(void) {
                "  -n --lines=INTEGER  Number of journal entries to show\n"
                "  -o --output=STRING  Change journal output mode (short, short-iso,\n"
                "                              short-precise, short-monotonic, verbose,\n"
-               "                              export, json, json-pretty, json-sse, cat)\n"
+               "                              export, json, json-pretty, json-sse, cat,\n"
+               "                              format:FORMAT-STRING)\n"
                "     --plain          Print unit dependencies as a list instead of a tree\n\n"
                "Unit Commands:\n"
                "  list-units [PATTERN...]         List loaded units\n"
@@ -6292,6 +6296,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
         };
 
         int c;
+        int err;
 
         assert(argc >= 0);
         assert(argv);
@@ -6513,11 +6518,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'o':
-                        arg_output = output_mode_from_string(optarg);
-                        if (arg_output < 0) {
-                                log_error("Unknown output '%s'.", optarg);
-                                return -EINVAL;
-                        }
+                        arg_output = optarg;
                         break;
 
                 case 'i':
@@ -6574,6 +6575,11 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
         if (arg_transport != BUS_TRANSPORT_LOCAL && arg_scope != UNIT_FILE_SYSTEM) {
                 log_error("Cannot access user instance remotely.");
                 return -EINVAL;
+        }
+
+        if ((err = output_formatter_from_string(arg_output, &arg_formatter)) < 0) {
+            log_error("Unknown / malformed output format '%s'.", arg_output);
+            return err;
         }
 
         return 1;

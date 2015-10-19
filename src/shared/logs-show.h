@@ -30,10 +30,13 @@
 #include "util.h"
 #include "output-mode.h"
 
+typedef struct _OutputFormatter OutputFormatter;
+
 int output_journal(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
+                //OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags,
                 bool *ellipsized);
@@ -52,7 +55,8 @@ int add_matches_for_user_unit(
 int show_journal_by_unit(
                 FILE *f,
                 const char *unit,
-                OutputMode mode,
+                //OutputMode mode,
+                OutputFormatter *formatter,
                 unsigned n_columns,
                 usec_t not_before,
                 unsigned how_many,
@@ -70,3 +74,11 @@ void json_escape(
 
 const char* output_mode_to_string(OutputMode m) _const_;
 OutputMode output_mode_from_string(const char *s) _pure_;
+
+int output_formatter_from_string(const char *arg, OutputFormatter **formatter);
+int output_formatter_from_mode(OutputMode mode, OutputFormatter **formatter);
+
+OutputMode output_formatter_get_mode(OutputFormatter *formatter);
+
+void output_formatter_free(OutputFormatter **formatter);
+#define _cleanup_output_formatter_ _cleanup_(output_formatter_free)

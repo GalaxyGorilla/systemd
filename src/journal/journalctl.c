@@ -213,7 +213,8 @@ static void help(void) {
                "  -r --reverse             Show the newest entries first\n"
                "  -o --output=STRING       Change journal output mode (short, short-iso,\n"
                "                                   short-precise, short-monotonic, verbose,\n"
-               "                                   export, json, json-pretty, json-sse, cat)\n"
+               "                                   export, json, json-pretty, json-sse, cat,\n"
+               "                                   format:FORMAT-STRING)\n"
                "     --utc                 Express time in Coordinated Universal Time (UTC)\n"
                "  -x --catalog             Add message explanations where available\n"
                "     --no-full             Ellipsize fields\n"
@@ -338,6 +339,8 @@ static int parse_argv(int argc, char *argv[]) {
         };
 
         int c, r;
+        int err;
+        OutputMode mode;
 
         assert(argc >= 0);
         assert(argv);
@@ -372,19 +375,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'o':
-                        arg_output = output_mode_from_string(optarg);
-                        if (arg_output < 0) {
-                                log_error("Unknown output format '%s'.", optarg);
-                                return -EINVAL;
-                        }
-
-                        if (arg_output == OUTPUT_EXPORT ||
-                            arg_output == OUTPUT_JSON ||
-                            arg_output == OUTPUT_JSON_PRETTY ||
-                            arg_output == OUTPUT_JSON_SSE ||
-                            arg_output == OUTPUT_CAT)
-                                arg_quiet = true;
-
+                        arg_output = optarg;
                         break;
 
                 case 'l':
@@ -706,6 +697,20 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
+
+        if ((err = output_formatter_from_string(arg_output,
+                &arg_formatter)) < 0) {
+                log_error("Unknown/malformed output format '%s'.", arg_output);
+                return err;
+        }
+
+        mode = output_formatter_get_mode(arg_formatter);
+        if (mode == OUTPUT_EXPORT ||
+            mode == OUTPUT_JSON ||
+            mode == OUTPUT_JSON_PRETTY ||
+            mode == OUTPUT_JSON_SSE ||
+            mode == OUTPUT_CAT)
+                arg_quiet = true;
 
         if (arg_follow && !arg_no_tail && !arg_since && arg_lines == ARG_LINES_DEFAULT)
                 arg_lines = 10;
@@ -2075,7 +2080,8 @@ int main(int argc, char *argv[]) {
                                 arg_catalog * OUTPUT_CATALOG |
                                 arg_utc * OUTPUT_UTC;
 
-                        r = output_journal(stdout, j, arg_output, 0, flags, &ellipsized);
+                        //r = output_journal(stdout, j, arg_output, 0, flags, &ellipsized);
+                        r = output_journal(stdout, j, arg_formatter, 0, flags, &ellipsized);
                         need_seek = true;
                         if (r == -EADDRNOTAVAIL)
                                 break;
