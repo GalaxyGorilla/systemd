@@ -267,9 +267,9 @@ static int print_time(uint64_t ts, OutputFieldType type, FILE *f) {
 }
 
 static int output_short(
+                OutputFormatter *formatter,
                 FILE *f,
                 sd_journal *j,
-                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -385,7 +385,6 @@ static int output_short(
                 uint64_t x;
 
                 r = -ENOENT;
-                gettime_r = (flags & OUTPUT_UTC) ? gmtime_r : localtime_r;
 
                 if (realtime)
                         r = safe_atou64(realtime, &x);
@@ -451,9 +450,9 @@ static int output_short(
 }
 
 static int output_verbose(
+                OutputFormatter *formatter,
                 FILE *f,
                 sd_journal *j,
-                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -555,9 +554,9 @@ static int output_verbose(
 }
 
 static int output_export(
+                OutputFormatter *formatter,
                 FILE *f,
                 sd_journal *j,
-                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -688,9 +687,9 @@ void json_escape(
 }
 
 static int output_json(
+                OutputFormatter *formatter,
                 FILE *f,
                 sd_journal *j,
-                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 
@@ -904,9 +903,9 @@ finish:
 }
 
 static int output_cat(
+                OutputFormatter *formatter,
                 FILE *f,
                 sd_journal *j,
-                OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags) {
 

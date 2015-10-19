@@ -54,7 +54,8 @@ static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
 static char *arg_host = NULL;
 static bool arg_ask_password = true;
 static unsigned arg_lines = 10;
-static OutputMode arg_output = OUTPUT_SHORT;
+static const char *arg_output = "short";
+static OutputFormatter *arg_formatter = NULL;
 
 static void pager_open_if_enabled(void) {
 
@@ -499,7 +500,7 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
                         show_journal_by_unit(
                                         stdout,
                                         i.scope,
-                                        arg_output,
+                                        arg_formatter,
                                         0,
                                         i.timestamp.monotonic,
                                         arg_lines,
@@ -581,7 +582,7 @@ static int print_user_status_info(sd_bus *bus, const char *path, bool *new_line)
                 show_journal_by_unit(
                                 stdout,
                                 i.slice,
-                                arg_output,
+                                arg_formatter,
                                 0,
                                 i.timestamp.monotonic,
                                 arg_lines,
@@ -1167,7 +1168,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "  -s --signal=SIGNAL       Which signal to send\n"
                "  -n --lines=INTEGER       Number of journal entries to show\n"
                "  -o --output=STRING       Change journal output mode (short, short-monotonic,\n"
-               "                           verbose, export, json, json-pretty, json-sse, cat)\n\n"
+               "                           verbose, export, json, json-pretty, json-sse, cat,\n\n"
+               "                           format:FORMAT-STRING)\n"
                "Session Commands:\n"
                "  list-sessions            List sessions\n"
                "  session-status [ID...]   Show session status\n"
@@ -1228,6 +1230,7 @@ static int parse_argv(int argc, char *argv[]) {
         };
 
         int c, r;
+        int err;
 
         assert(argc >= 0);
         assert(argv);
@@ -1273,11 +1276,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'o':
-                        arg_output = output_mode_from_string(optarg);
-                        if (arg_output < 0) {
-                                log_error("Unknown output '%s'.", optarg);
-                                return -EINVAL;
-                        }
+                        arg_output = optarg;
                         break;
 
                 case ARG_NO_PAGER:
@@ -1320,6 +1319,11 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
+
+        if ((err = output_formatter_from_string(arg_output, &arg_formatter)) < 0) {
+                log_error("Unknown / malformed output format '%s'.", arg_output);
+                return err;
+        }
 
         return 1;
 }

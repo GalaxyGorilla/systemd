@@ -35,7 +35,6 @@ typedef struct _OutputFormatter OutputFormatter;
 int output_journal(
                 FILE *f,
                 sd_journal *j,
-                OutputMode mode,
                 OutputFormatter *formatter,
                 unsigned n_columns,
                 OutputFlags flags,
@@ -55,7 +54,6 @@ int add_matches_for_user_unit(
 int show_journal_by_unit(
                 FILE *f,
                 const char *unit,
-                OutputMode mode,
                 OutputFormatter *formatter,
                 unsigned n_columns,
                 usec_t not_before,

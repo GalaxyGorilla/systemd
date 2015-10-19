@@ -72,7 +72,8 @@ enum {
         ARG_LINES_ALL = -1,
 };
 
-static OutputMode arg_output = OUTPUT_SHORT;
+static const char *arg_output = "short";
+static OutputFormatter *arg_formatter = NULL;
 static bool arg_utc = false;
 static bool arg_pager_end = false;
 static bool arg_follow = false;
