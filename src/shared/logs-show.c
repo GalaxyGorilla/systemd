@@ -54,8 +54,7 @@ typedef enum {
         OUTPUT_FIELD_DATE_PRECISE, /* data is a variable to show as a precise date */
         OUTPUT_FIELD_DATE_ISO,     /* data is a variable to show as a ISO date */
         OUTPUT_FIELD_DATE_RAW,     /* data is a variable to show as a RAW timestamp */
-        OUTPUT_FIELD_STRING,       /* data is a variable to show as a printable string */
-        OUTPUT_FIELD_STRING_RAW,   /* data is a variable to show as a raw string */
+        OUTPUT_FIELD_RAW,          /* data is a variable to show as a raw string */
 } OutputFieldType;
 
 typedef struct _OutputField {
@@ -993,48 +992,47 @@ static int output_format(
                                 return r;
                         break;
 
-                        case OUTPUT_FIELD_STRING:
-                        case OUTPUT_FIELD_STRING_RAW:
-                                sd_journal_set_data_threshold(j, 0);
+                case OUTPUT_FIELD_RAW:
+                        sd_journal_set_data_threshold(j, 0);
 
-                                r = sd_journal_get_data(j, formatter->fields[i].data, &data, &l);
-                                if (r < 0) {
-                                        if (r == -ENOENT)
-                                                continue;
+                        r = sd_journal_get_data(j, formatter->fields[i].data, &data, &l);
+                        if (r < 0) {
+                                if (r == -ENOENT)
+                                        continue;
 
-                                        log_error("Failed to get data: %s", strerror(-r));
+                                log_error("Failed to get data: %s", strerror(-r));
                                         return r;
-                                }
+                        }
 
-                                assert(l >= formatter->fields[i].datalen);
+                        assert(l >= formatter->fields[i].datalen);
 
-                                data = ((const char *)data) + formatter->fields[i].datalen + 1;
-                                l -= formatter->fields[i].datalen + 1;
+                        data = ((const char *)data) + formatter->fields[i].datalen + 1;
+                        l -= formatter->fields[i].datalen + 1;
 
-                                if (formatter->fields[i].vallen != 0 && l > formatter->fields[i].vallen) {
-                                        l = formatter->fields[i].vallen;
+                        if (formatter->fields[i].vallen != 0 && l > formatter->fields[i].vallen) {
+                                l = formatter->fields[i].vallen;
                                         truncated = true;
-                                } else {
-                                        truncated = false;
-                                }
+                        } else {
+                                truncated = false;
+                        }
 
-                                if (formatter->fields[i].type == OUTPUT_FIELD_STRING_RAW) {
+                        if (formatter->fields[i].type == OUTPUT_FIELD_RAW) {
+                                fwrite((const char*) data, 1, l, f);
+                        } else {
+                                if (((const char *)data)[l - 1] == '\n')
+                                        l--;
+
+                                if (!utf8_is_printable(data, l)) {
+                                        char bytes[FORMAT_BYTES_MAX];
+                                        fprintf(f, "[%s blob data]", format_bytes(bytes, sizeof(bytes), l));
+                                } else {
                                         fwrite((const char*) data, 1, l, f);
-                                } else {
-                                        if (((const char *)data)[l - 1] == '\n')
-                                                l--;
-
-                                        if (!utf8_is_printable(data, l)) {
-                                                char bytes[FORMAT_BYTES_MAX];
-                                                fprintf(f, "[%s blob data]", format_bytes(bytes, sizeof(bytes), l));
-                                        } else {
-                                                fwrite((const char*) data, 1, l, f);
-                                        }
-                                        if (truncated)
-                                                fputs("...", f);
                                 }
-                                break;
-                    }
+                                if (truncated)
+                                        fputs("...", f);
+                        }
+                        break;
+                }
         }
 
         return 0;
@@ -1484,62 +1482,9 @@ static int output_formatter_add_field(OutputFormatter *formatter,
         return 0;
 }
 
-static int output_formatter_expand_escapes(char *data)
-{
-        size_t i, j;
-
-        for (i = 0, j = 0; data[i] != '\0'; i++) {
-                if (data[i] == '\\') {
-                        i++;
-                        switch (data[i]) {
-                        case '\'':
-                                data[j++] = '\'';
-                                break;
-                        case '"':
-                                data[j++] = '"';
-                                break;
-                        case '?':
-                                data[j++] = '?';
-                                break;
-                        case '\\':
-                                data[j++] = '\\';
-                                break;
-                        case 'a':
-                                data[j++] = '\a';
-                                break;
-                        case 'b':
-                                data[j++] = '\b';
-                                break;
-                        case 'f':
-                                data[j++] = '\f';
-                                break;
-                        case 'n':
-                                data[j++] = '\n';
-                                break;
-                        case 'r':
-                                data[j++] = '\r';
-                                break;
-                        case 't':
-                                data[j++] = '\t';
-                                break;
-                        case 'v':
-                                data[j++] = '\v';
-                                break;
-                        default:
-                                return -EINVAL;
-                        }
-                } else {
-                        data[j++] = data[i];
-                }
-        }
-        data[j] = '\0';
-
-        return 0;
-}
-
-static int output_formatter_parse_format(OutputFormatter *formatter,
-        const char *format) {
+static int output_formatter_parse_format(OutputFormatter *formatter, const char *format) {
         const char *prev = format;
+        char *final_newline;
         int r;
 
         do {
@@ -1547,14 +1492,11 @@ static int output_formatter_parse_format(OutputFormatter *formatter,
                 char *data;
                 size_t datalen;
 
-                next = strstr(format, "%(");
+                next = strstr(format, "{");
 
                 if (!next || next != prev) {
                         datalen = next ? (size_t)(next - prev) : strlen(prev);
                         data = strndup(prev, datalen);
-
-                        if ((r = output_formatter_expand_escapes(data)) < 0)
-                                return r;
 
                         if ((r = output_formatter_add_field(formatter, OUTPUT_FIELD_LITERAL, 0, data, datalen)) < 0) {
                                 free(data);
@@ -1565,54 +1507,41 @@ static int output_formatter_parse_format(OutputFormatter *formatter,
                 if (next) {
                         const char *end;
                         OutputFieldType type;
-                        char *typestr;
-                        char *lenstr;
+                        char *optstr;
                         uint64_t vallen;
 
-                        end = strchr(next, ')');
+                        end = strchr(next, '}');
                         if (!end)
                                 return -EINVAL;
 
-                        datalen = (end - (next + 2));
-                        data = strndup(next + 2, datalen);
+                        datalen = (end - (next + 1));
+                        data = strndup(next + 1, datalen);
 
-                        if ((typestr = strchr(data, ':')) != NULL) {
-                                datalen = typestr - data;
-                                *typestr = '\0';
-                                typestr++;
-                                lenstr = strchr(typestr, ':');
-                                if (lenstr) {
-                                        *lenstr = '\0';
-                                        lenstr++;
-                                        if ((r = safe_atou64(lenstr, &vallen)) < 0) {
-                                                free(data);
-                                                return r;
-                                        }
-                                }
+                        if ((optstr = strchr(data, ':')) != NULL) {
+                                datalen = optstr - data;
+                                *optstr = '\0';
+                                optstr++;
 
-                                if (streq(typestr, "string"))
-                                        type = OUTPUT_FIELD_STRING;
-                                else if (streq(typestr, "date"))
+                                if (streq(optstr, "date"))
                                         type = OUTPUT_FIELD_DATE;
-                                else if (streq(typestr, "date-precise"))
+                                else if (streq(optstr, "date-precise"))
                                         type = OUTPUT_FIELD_DATE_PRECISE;
-                                else if (streq(typestr, "date-iso"))
+                                else if (streq(optstr, "date-iso"))
                                         type = OUTPUT_FIELD_DATE_ISO;
-                                else if (streq(typestr, "date-raw"))
+                                else if (streq(optstr, "date-raw"))
                                         type = OUTPUT_FIELD_DATE_RAW;
-                                else if (streq(typestr, "string-raw"))
-                                        type = OUTPUT_FIELD_STRING_RAW;
+                                else if (safe_atou64(optstr, &vallen) >= 0)
+                                        type = OUTPUT_FIELD_RAW;
                                 else {
                                         free(data);
                                         return -EINVAL;
                                 }
+
                         } else {
-                                if (streq(data, "__MONOTONIC_TIMESTAMP"))
-                                        type = OUTPUT_FIELD_DATE_RAW;
-                                else if (streq(data, "__REALTIME_TIMESTAMP"))
+                                if (streq(data, "__REALTIME_TIMESTAMP"))
                                         type = OUTPUT_FIELD_DATE;
                                 else
-                                        type = OUTPUT_FIELD_STRING;
+                                        type = OUTPUT_FIELD_RAW;
                         }
 
                         if ((r = output_formatter_add_field(formatter, type, vallen, data, datalen)) < 0) {
@@ -1625,6 +1554,13 @@ static int output_formatter_parse_format(OutputFormatter *formatter,
                         format = NULL;
                 }
         } while (format && *format);
+
+        final_newline = (char *) malloc(sizeof(char));
+        final_newline[0] = '\n';
+        if ((r = output_formatter_add_field(formatter, OUTPUT_FIELD_LITERAL, 0, final_newline, 1)) < 0){
+                free(final_newline);
+                return r;
+        }
 
         return 0;
 }
