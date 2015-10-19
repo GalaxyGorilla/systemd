@@ -1555,9 +1555,9 @@ static int output_formatter_parse_format(OutputFormatter *formatter, const char 
                 }
         } while (format && *format);
 
-        final_newline = (char *) malloc(sizeof(char));
-        final_newline[0] = '\n';
-        if ((r = output_formatter_add_field(formatter, OUTPUT_FIELD_LITERAL, 0, final_newline, 1)) < 0){
+        final_newline = (char *) malloc( 2 * sizeof(char) );
+        strncpy(final_newline, "\n", 2);
+        if ((r = output_formatter_add_field(formatter, OUTPUT_FIELD_LITERAL, 0, final_newline, 2)) < 0){
                 free(final_newline);
                 return r;
         }
@@ -1565,7 +1565,7 @@ static int output_formatter_parse_format(OutputFormatter *formatter, const char 
         return 0;
 }
 
-#define DEFAULT_FORMAT "%(__REALTIME_TIMESTAMP) %(_HOSTNAME) %(SYSLOG_IDENTIFIER)[%(_PID)]: %(MESSAGE)\\n"
+#define DEFAULT_FORMAT "{__REALTIME_TIMESTAMP} {_HOSTNAME} {SYSLOG_IDENTIFIER}[{_PID}]: {MESSAGE}"
 
 int output_formatter_from_mode(OutputMode mode, OutputFormatter **formatter)
 {
